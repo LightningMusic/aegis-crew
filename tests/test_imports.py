@@ -1,6 +1,19 @@
 import pytest
-from agents.config import LLM_CONFIG, MAX_GROUPCHAT_ROUNDS
-from agents.phase_planner import _compact_request_context, _parse_phases, build_planning_prompt, generate_phases
+from agents.config import (
+    LLM_CONFIG,
+    MAX_GROUPCHAT_ROUNDS,
+    PHASE_PLANNER_MAX_AUDIT_CONTEXT_CHARS,
+    PHASE_PLANNER_MAX_REQUEST_CONTEXT_CHARS,
+    PHASE_PLANNER_NUM_CTX,
+    PHASE_PLANNER_READ_TIMEOUT_SECONDS,
+)
+from agents.phase_planner import (
+    _compact_audit_context,
+    _compact_request_context,
+    _parse_phases,
+    build_planning_prompt,
+    generate_phases,
+)
 from agents.tool_bridge import extract_tool_calls, make_interceptor
 from agents.pipeline import _has_tested_completion_report, _is_passing_test_result, _verified_completion, audit_project
 from agents.tools import run_tests
@@ -134,10 +147,53 @@ def test_request_source_accepts_an_srs_directory(tmp_path):
 
 
 def test_large_srs_is_compacted_without_discarding_its_start_or_end():
-    source = "START" + ("x" * 20_000) + "END"
+    # Must exceed PHASE_PLANNER_MAX_REQUEST_CONTEXT_CHARS (24000 as of
+    # 2026-08-27, raised to use more of the Modelfile's 32768-token window)
+    # for compaction to actually trigger.
+    source = "START" + ("x" * 30_000) + "END"
     compacted = _compact_request_context(source)
 
     assert len(compacted) < len(source)
     assert compacted.startswith("START")
     assert compacted.endswith("END")
     assert "SRS middle omitted" in compacted
+
+
+def test_large_audit_is_compacted_without_discarding_its_start_or_end():
+    # Regression test for the 2026-08-27 phase-planning timeout: a large but
+    # legitimate project audit (recursive file listing + progress.json) was
+    # never capped, only the request/SRS side was, so a real project's audit
+    # could push the combined planning prompt to the edge of the model's
+    # context window on its own.
+    source = "Recursive file listing:\n" + ("x" * 20_000) + '\n\nExisting data/progress.json:\n{"phases": []}'
+    compacted = _compact_audit_context(source)
+
+    assert len(compacted) < len(source)
+    assert compacted.startswith("Recursive file listing:")
+    assert compacted.endswith('{"phases": []}')
+    assert "Audit middle omitted" in compacted
+
+
+def test_planning_prompt_caps_combined_size_even_with_a_large_audit():
+    # The bug: a compacted (<=14000 char) request combined with an UNCAPPED
+    # audit (e.g. 16582 chars, as in the run that triggered this) still
+    # produced a ~31000 char / ~7750 token prompt -- close enough to
+    # local-code:7b's 8192-token window, with no headroom for the system
+    # prompt or the model's own output, to explain a real 300s timeout.
+    # This asserts the combined prompt now stays under a safe bound.
+    huge_request = "R" * 20_000
+    huge_audit = "Recursive file listing:\n" + ("A" * 16_582) + "\n\nExisting data/progress.json:\n{}"
+
+    prompt = build_planning_prompt(huge_request, huge_audit)
+
+    assert len(prompt) <= (PHASE_PLANNER_MAX_REQUEST_CONTEXT_CHARS + PHASE_PLANNER_MAX_AUDIT_CONTEXT_CHARS + 1_000)
+
+
+def test_phase_planner_uses_generous_configured_timeout_and_explicit_num_ctx():
+    # Regression guard for both root causes of the 2026-08-27 timeout:
+    # (1) a hardcoded 300s client timeout far below the 1800s budget every
+    #     other model call in this project gets (agents/config.py), and
+    # (2) num_ctx never being set explicitly on this call, contrary to the
+    #     project's own stated design principle.
+    assert PHASE_PLANNER_READ_TIMEOUT_SECONDS >= 1800
+    assert PHASE_PLANNER_NUM_CTX >= 8192

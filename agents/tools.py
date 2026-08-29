@@ -88,7 +88,7 @@ def write_file(path: str, content: str, project_path: str) -> str:
                 tofile=f"b/{path}",
             )
         )
-        results = check_diff(diff, project_path)
+        results = check_diff(diff, project_path, new_line_counts={path: len(content.splitlines())})
         if any_unsafe(results):
             message = next(r.message for r in results if not r.safe)
             log.warning("write_file rejected for %s: %s", path, message)

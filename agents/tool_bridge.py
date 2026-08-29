@@ -111,79 +111,15 @@ it -- emit the JSON and let it run.
 """
 
 
-import json
 import logging
 import re
-from typing import Any, Callable
 
 log = logging.getLogger(__name__)
 
-ToolFn = Callable[..., str]
-ReplyFn = Callable[..., tuple[bool, str | None]]
-
-ROLE_TOOLS: dict[str, list[str]] = {
-    "Developer": ["read_file", "write_file", "list_files", "run_shell"],
-    "Infra": ["read_file", "write_file", "make_dir", "list_files", "run_shell"],
-    "Security": ["read_file", "list_files"],
-    "Tester": ["read_file", "write_file", "list_files", "run_tests"],
-}
-
-TOOL_SCHEMA_DESCRIPTIONS: dict[str, str] = {
-    "read_file": "Read a file's contents.",
-    "write_file": "Write content to a file. Creates the file if it doesn't exist. Rejected automatically if it would delete a large portion of an existing file's content.",
-    "make_dir": "Create a directory, including any missing parent directories.",
-    "list_files": "List the files and subdirectories inside a directory.",
-    "run_shell": "Run a shell command inside the project directory and return its output.",
-    "run_tests": "Run the project's test suite (pytest) and return pass/fail with output.",
-}
-
-TOOL_USAGE_EXAMPLES: dict[str, str] = {
-    "read_file": '{"name": "read_file", "arguments": {"path": "relative/path.py"}}'
-                 " -- read a file's contents.",
-    "write_file": '{"name": "write_file", "arguments": {"path": "relative/path.py", "content": "full file contents"}}'
-                  " -- write a file. Creates it if it doesn't exist. Automatically REJECTED if it would"
-                  " delete a large portion of an existing file -- if rejected, do not retry the same write,"
-                  " reconsider the change instead.",
-    "make_dir": '{"name": "make_dir", "arguments": {"path": "relative/dir"}}'
-                " -- create a directory, including missing parents.",
-    "list_files": '{"name": "list_files", "arguments": {"path": "."}}'
-                  " -- list files/directories at a path relative to the project root ('.' for root).",
-    "run_shell": '{"name": "run_shell", "arguments": {"command": "shell command"}}'
-                 " -- run a shell command inside the project directory. Has a timeout; long-running"
-                 " commands will be killed.",
-    "run_tests": '{"name": "run_tests", "arguments": {}}'
-                 " -- run the project's pytest suite and report pass/fail with output.",
-}
-
-
-def build_protocol_block(role: str) -> str:
-    """
-    Build the tool-usage instructions appended to a persona's system
-    message, listing ONLY the tools that role is actually permitted to
-    call.
-    """
-    tool_names = ROLE_TOOLS.get(role, [])
-    if not tool_names:
-        return ""
-
-    lines = [TOOL_USAGE_EXAMPLES[name] for name in tool_names]
-    tool_list = "\n".join(f"  {line}" for line in lines)
-
-    return f"""
-
-TOOL USAGE:
-To take an action, write a JSON object on its own line in EXACTLY this
-shape (this is not a suggestion -- the executor parses this exact format):
-  {{"name": "<tool_name>", "arguments": {{...}}}}
-
-You may include multiple JSON objects in one message, one per line, to
-take several actions at once. Available tools for your role:
-{tool_list}
-
-The Executor will run each one automatically and report the result back
-to the conversation. Do not describe what you would do instead of doing
-it -- emit the JSON and let it run.
-"""
+# (duplicate imports/ROLE_TOOLS/TOOL_SCHEMA_DESCRIPTIONS/TOOL_USAGE_EXAMPLES/
+# build_protocol_block block removed here -- it was a leftover merge
+# artifact that re-defined everything above verbatim and then immediately
+# got shadowed by it. No behavior change, just dead weight.)
 
 
 def extract_tool_calls(text: str) -> list[dict[str, Any]]:
@@ -278,12 +214,25 @@ def _extract_code_blocks(text: str) -> list[dict[str, Any]]:
                 break
 
         # 2. Search preceding prose text up to 300 chars before backticks
+        #    NOTE: the character class here must include path separators
+        #    (/ and \) as well as spaces around them -- otherwise a mention
+        #    like "update the src/bios/providers/default.py file" only
+        #    captures the bare filename "default.py", and write_file then
+        #    (correctly) resolves that bare name relative to the project
+        #    root instead of the intended subdirectory. This is what was
+        #    silently dropping provider files into the project root instead
+        #    of src/bios/providers/.
         if not path_val:
             start_pos = max(0, match.start() - 300)
             preceding = text[start_pos:match.start()]
-            m = re.search(r"(?:file(?:name)?|path)?[:\s]*`?([\w\.-]+\.(?:py|json|toml|sh|txt|md|csv))`?", preceding, re.IGNORECASE)
+            m = re.search(r"(?:file(?:name)?|path)?[:\s]*`?([\w./\\-]+\.(?:py|json|toml|sh|txt|md|csv))`?", preceding, re.IGNORECASE)
             if m:
                 path_val = m.group(1).strip()
+                # Normalize Windows-style backslashes to forward slashes so
+                # downstream Path handling (and the project-root containment
+                # check in tools._resolve_within_project) behaves the same
+                # regardless of how the model phrased the path.
+                path_val = path_val.replace("\\", "/")
 
         # 3. Default fallback if Python syntax is detected
         if not path_val and ("def " in content or "import " in content or "print(" in content or "with open" in content):

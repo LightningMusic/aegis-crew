@@ -6,10 +6,17 @@ The persona is the only thing that differentiates one agent's behavior
 from another -- there is no separate model file per role.
 
 DESIGN NOTE ON SCALE (read this before changing MAX_GROUPCHAT_ROUNDS):
-local-code:7b has an 8192-token context window. A full SRS document plus
-an unbounded checklist plus file contents plus five agents' running
-conversation will silently exceed that and start dropping context --
-the exact failure mode the original AegisCoder project was built to avoid.
+local-code:7b's context window is finite (set in its Modelfile -- 32768
+tokens as of 2026-08-27, raised from an original 8192 specifically because
+large multi-hundred-file project audits were exceeding it; check
+`ollama show local-code:7b --modelfile` if this note goes stale). Whatever
+the current size, a full SRS document plus an unbounded checklist plus
+file contents plus five agents' running conversation will still eventually
+exceed it and start silently dropping context -- the exact failure mode
+the original AegisCoder project was built to avoid. AutoGen's client can't
+set num_ctx per call (see agents/phase_planner.py's module docstring for
+why the phase planner bypasses AutoGen for exactly this reason), so this
+GroupChat conversation always runs at whatever the Modelfile bakes in.
 So scale is handled by PHASING, not by making one conversation bigger:
 the ProjectManager breaks work into phases up front (see phase_planner.py),
 and each phase gets its OWN bounded GroupChat conversation with fresh

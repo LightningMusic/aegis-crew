@@ -131,7 +131,11 @@ def _apply_memory_cap(pid: int, max_memory_mb: int) -> None:
         return
 
     try:
-        hJob = win32job.CreateJobObject(0, "AegisCrew-Ollama")  # pyright: ignore[reportArgumentType]
+        # First arg is security attributes: must be None (default security)
+        # or an actual PySECURITY_ATTRIBUTES object -- passing 0 raises
+        # "The object is not a PySECURITY_ATTRIBUTES object" and the cap
+        # silently never gets applied. This was that bug.
+        hJob = win32job.CreateJobObject(None, "AegisCrew-Ollama")  # pyright: ignore[reportArgumentType]
         info = win32job.QueryInformationJobObject(hJob, win32job.JobObjectExtendedLimitInformation)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportArgumentType]
         max_bytes = max_memory_mb * 1024 * 1024
 
